@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Test d'Empathie – Connexion & Passation unique</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- Firebase v10 (modular) -->
+  <script type="module">
+    const firebaseConfig = {
+      apiKey: "VOTRE_API_KEY",
+      authDomain: "VOTRE_PROJET.firebaseapp.com",
+      projectId: "VOTRE_PROJET",
+      storageBucket: "VOTRE_PROJET.appspot.com",
+      messagingSenderId: "XXXXXXXXXXXX",
+      appId: "1:XXXXXXXXXXXX:web:XXXXXXXXXXXXXX"
+    };
+
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
+    import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js";
+    import { getFirestore, doc, getDoc, setDoc, serverTimestamp, collection, getDocs } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js";
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+
+    const $ = (sel) => document.querySelector(sel);
+    const show = (sel) => $(sel).classList.remove('hidden');
+    const hide = (sel) => $(sel).classList.add('hidden');
+
+    const TEACHER_EMAIL = "enseignant@exemple.com"; // À adapter
+
+    const QUESTIONS = [
+      { id: 'q1', t: "Votre camarade arrive en retard et semble essoufflé...", o: ['Joie','Colère','Honte','Détente'], good: 'C' },
+      { id: 'q2', t: "Une collègue de stage a le regard fixe...", o: ['Enthousiasme','Tristesse','Colère','Fierté'], good: 'B' },
+      { id: 'q3', t: "Quelqu’un éclate de rire après votre intervention orale...", o: ['Rire avec lui','L\'ignorer','Lui demander calmement pourquoi','Le critiquer devant les autres'], good: 'C' },
+      { id: 'q4', t: "En atelier, un camarade a raté sa démonstration...", o: ['Se moquer','Ne rien dire','Lui proposer de retravailler','Dire que ça arrive à tout le monde'], good: 'C' },
+      { id: 'q5', t: "Un client au téléphone semble nerveux...", o: ['L\'interrompre','Attendre calmement','Lui dire de se calmer','Dire que vous êtes pressé'], good: 'B' },
+      { id: 'q6', t: "Quand un ami me parle d’un problème...", o: ['Concerné','Peu intéressé','Stressé','Ennuyé'], good: 'A' },
+      { id: 'q7', t: "Lorsque je vois quelqu’un pleurer...", o: ['Je cherche','Je m\'éloigne','Je plaisante','Je ne sais pas'], good: 'A' }
+    ];
+
+    let allAttempts = [];
+
+    function renderQuestions() {
+      const wrap = $('#questions');
+      wrap.innerHTML = '';
+      QUESTIONS.forEach((q,i) => {
+        const letters = ['A','B','C','D'];
+        const block = document.createElement('div');
+        block.className = 'mb-6';
+        block.innerHTML = `
+          <p class="font-semibold mb-2">${i+1}. ${q.t}</p>
+          ${q.o.map((opt,idx)=>`
+            <label class="block cursor-pointer">
+              <input type="radio" name="${q.id}" value="${letters[idx]}" class="mr-2"/> ${opt}
+            </label>
+          `).join('')}`;
+        wrap.appendChild(block);
+      });
+    }
+
+    onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        hide('#authCard');
+        show('#appCard');
+        $('#userEmail').textContent = user.email;
+
+        if (user.email === TEACHER_EMAIL) {
+          show('#teacherPanel');
+          loadAllResults();
+          return;
+        }
+
+        const attemptRef = doc(db, 'attempts', user.uid);
+        const snap = await getDoc(attemptRef);
+        if (snap.exists()) {
+          displayCompleted(snap.data());
+        } else {
+          renderQuestions();
+          show('#testForm');
+        }
+      } else {
+        show('#authCard');
+        hide('#appCard');
+      }
+    });
+
+    $('#signInForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        await signInWithEmailAndPassword(auth, $('#email').value.trim(), $('#password').value);
+      } catch (err) { $('#authMsg').textContent = err.message; }
+    });
+
+    $('#signUpForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        const userCred = await createUserWithEmailAndPassword(auth, $('#newEmail').value.trim(), $('#newPassword').value);
+        const formation = $('#formation').value.trim();
+        await setDoc(doc(db, 'users', userCred.user.uid), { email: userCred.user.email, formation });
+      } catch (err) { $('#authMsg').textContent = err.message; }
+    });
+
+    $('#logoutBtn').addEventListener('click', async () => { await signOut(auth); });
+
+    $('#testForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const user = auth.currentUser;
+      if (!user) return;
+
+      const answers = {};
+      let score=0;
+      QUESTIONS.forEach(q=>{
+        const sel = document.querySelector(`input[name="${q.id}"]:checked`);
+        const val = sel?sel.value:'';
+        answers[q.id]=val;
+        if(val===q.good) score++;
+      });
+
+      hide('#testForm');
+      const attemptRef=doc(db,'attempts',user.uid);
+      const userDoc = await getDoc(doc(db,'users',user.uid));
+      const formation = userDoc.exists()? userDoc.data().formation : '';
+      const payload={email:user.email,formation,score,total:QUESTIONS.length,answers,completedAt:serverTimestamp(),completed:true};
+      const existing=await getDoc(attemptRef);
+      if(existing.exists()){displayCompleted(existing.data());return;}
+      await setDoc(attemptRef,payload);
+      displayCompleted(payload);
+    });
+
+    function displayCompleted(data){
+      $('#scoreLine').textContent=`Score : ${data.score} / ${data.total}`;
+      const wrap=$('#answersList');
+      wrap.innerHTML='';
+      QUESTIONS.forEach((q,i)=>{
+        const got=data.answers?.[q.id]||'';
+        const li=document.createElement('li');
+        li.className='mb-2';
+        li.innerHTML=`<div class="p-3 border rounded-lg ${got===q.good?'bg-green-50 border-green-300':'bg-red-50 border-red-300'}">
+          <p>${i+1}. ${q.t}</p>
+          <p class="text-sm">Votre réponse: ${got||'—'}</p>
+          <p class="text-sm">Bonne réponse: ${q.good}</p>
+        </div>`;
+        wrap.appendChild(li);
+      });
+      show('#resultCard');
+    }
+
+    async function loadAllResults(){
+      const querySnap=await getDocs(collection(db,'attempts'));
+      allAttempts = [];
+      querySnap.forEach(docSnap=>allAttempts.push(docSnap.data()));
+
+      const formations=new Set();
+      allAttempts.forEach(d=>formations.add(d.formation||''));
+      const filter=$('#formationFilter');
+      filter.innerHTML='<option value="">Toutes</option>';
+      formations.forEach(f=>{if(f) filter.innerHTML+=`<option value="${f}">${f}</option>`;});
+      renderTeacherTable(filter.value);
+      renderCharts();
+      filter.addEventListener('change',()=>{
+        renderTeacherTable(filter.value);
+        renderCharts(filter.value);
+      });
+    }
+
+    function renderTeacherTable(formation){
+      const tbody=$('#teacherTableBody');
+      tbody.innerHTML='';
+      allAttempts.forEach(d=>{
+        if(formation && d.formation!==formation) return;
+        const tr=document.createElement('tr');
+        tr.innerHTML=`<td class='border px-2 py-1'>${d.email}</td><td class='border px-2 py-1'>${d.formation||''}</td><td class='border px-2 py-1'>${d.score}/${d.total}</td><td class='border px-2 py-1'><button class='text-blue-600 underline' data-email='${d.email}'>Voir réponses</button></td>`;
+        tbody.appendChild(tr);
+      });
+      tbody.querySelectorAll('button[data-email]').forEach(btn=>{
+        btn.addEventListener('click',()=>{
+          const d=allAttempts.find(a=>a.email===btn.dataset.email);
+          if(d) showDetail(d);
+        });
+      });
+    }
+
+    function renderCharts(formationFilter){
+      // Chart formations
+      const ctx=$('#formationChart').getContext('2d');
+      const counts={};
+      allAttempts.forEach(d=>{
+        if(formationFilter && d.formation!==formationFilter) return;
+        const f=d.formation||'Non défini';
+        counts[f]=(counts[f]||0)+1;
+      });
+      const data={labels:Object.keys(counts),datasets:[{label:'Nombre de candidats',data:Object.values(counts),backgroundColor:['#60a5fa','#34d399','#fbbf24','#f87171','#a78bfa','#f472b6']}]};
+      if(window.formChart) window.formChart.destroy();
+      window.formChart=new Chart(ctx,{type:'bar',data});
+
+      // Chart scores
+      const ctx2=$('#scoreChart').getContext('2d');
+      const scores={};
+      allAttempts.forEach(d=>{
+        if(formationFilter && d.formation!==formationFilter) return;
+        const f=d.formation||'Non défini';
+        if(!scores[f]) scores[f]=[];
+        scores[f].push(d.score);
+      });
+      const labels=Object.keys(scores);
+      const avgScores=labels.map(f=>{
+        const arr=scores[f];
+        return arr.reduce((a,b)=>a+b,0)/arr.length;
+      });
+      const data2={labels,datasets:[{label:'Score moyen',data:avgScores,backgroundColor:'#f59e0b'}]};
+      if(window.scoreChart) window.scoreChart.destroy();
+      window.scoreChart=new Chart(ctx2,{type:'bar',data:data2,options:{scales:{y:{beginAtZero:true,max:QUESTIONS.length}}}});
+    }
+
+    function showDetail(data){
+      const modal=$('#detailModal');
+      const content=$('#detailContent');
+      content.innerHTML=`<h3 class='font-bold mb-2'>${data.email} (${data.formation||''})</h3><p>Score: ${data.score}/${data.total}</p>`;
+      QUESTIONS.forEach((q,i)=>{
+        const got=data.answers?.[q.id]||'';
+        const div=document.createElement('div');
+        div.className='p-2 border-b';
+        div.innerHTML=`<p class='font-medium'>${i+1}. ${q.t}</p><p class='text-sm'>Réponse: ${got||'—'} | Bonne: ${q.good}</p>`;
+        content.appendChild(div);
+      });
+      show('#detailModal');
+    }
+
+    $('#closeDetail').addEventListener('click',()=>hide('#detailModal'));
+
+    $('#exportCSV').addEventListener('click', async ()=>{
+      const formation=$('#formationFilter').value;
+      let csv="Email,Formation,Score,Total\n";
+      allAttempts.forEach(d=>{
+        if(formation && d.formation!==formation) return;
+        csv+=`${d.email},${d.formation||''},${d.score},${d.total}\n`;
+      });
+      const blob=new Blob([csv],{type:"text/csv"});
+      const link=document.createElement('a');
+      link.href=URL.createObjectURL(blob);
+      link.download='resultats.csv';
+      link.click();
+    });
+
+    $('#exportPDF').addEventListener('click', async ()=>{
+      const formation=$('#formationFilter').value;
+      const { jsPDF } = window.jspdf;
+      const docPDF=new jsPDF();
+      docPDF.setFontSize(16);
+      docPDF.text("Résultats du Test d'Empathie",20,20);
+      let y=40;
+      let i=0;
+      allAttempts.forEach((d)=>{
+        if(formation && d.formation!==formation) return;
+        i++;
+        docPDF.text(`${i}. ${d.email} (${d.formation||''}) - Score: ${d.score}/${d.total}`,20,y);
+        y+=10;
+      });
+      docPDF.save('resultats.pdf');
+    });
+  </script>
+</head>
+<body class="bg-gray-100 min-h-screen p-6">
+  <div class="max-w-6xl mx-auto">
+    <div class="bg-white rounded-2xl shadow-lg p-8">
+      <h1 class="text-2xl font-bold text-center">Test d'Empathie – Passation unique</h1>
+
+      <div id="authCard" class="mt-8">
+        <div class="grid md:grid-cols-2 gap-6">
+          <form id="signInForm" class="border rounded-xl p-5">
+            <h2 class="font-semibold mb-3">Connexion</h2>
+            <input id="email" type="email" placeholder="Email" class="w-full border px-3 py-2 mb-3" />
+            <input id="password" type="password" placeholder="Mot de passe" class="w-full border px-3 py-2 mb-4" />
+            <button class="w-full bg-blue-600 text-white py-2 rounded-lg">Se connecter</button>
+          </form>
+          <form id="signUpForm" class="border rounded-xl p-5">
+            <h2 class="font-semibold mb-3">Créer un compte</h2>
+            <input id="newEmail" type="email" placeholder="Email" class="w-full border px-3 py-2 mb-3" />
+            <input id="newPassword" type="password" placeholder="Mot de passe" class="w-full border px-3 py-2 mb-3" />
+            <input id="formation" type="text" placeholder="Formation (ex: Bac Pro Vente)" class="w-full border px-3 py-2 mb-4" />
+            <button class="w-full bg-emerald-600 text-white py-2 rounded-lg">Créer</button>
+          </form>
+        </div>
+        <p id="authMsg" class="text-red-600 mt-4 text-center"></p>
+      </div>
+
+      <div id="appCard" class="mt-8 hidden">
+        <div class="flex items-center justify-between mb-4">
+          <div class="text-sm">Connecté : <span id="userEmail"></span></div>
+          <button id="logoutBtn" class="text-sm bg-gray-200 px-3 py-1 rounded">Déconnexion</button>
+        </div>
+
+        <form id="testForm" class="hidden">
+          <div id="questions"></div>
+          <button class="w-full mt-2 bg-indigo-600 text-white py-2 rounded-lg">Valider</button>
+        </form>
+
+        <div id="resultCard" class="hidden">
+          <p id="scoreLine" class="font-bold mb-3"></p>
+          <ul id="answersList"></ul>
+        </div>
+
+        <div id="teacherPanel" class="hidden mt-10">
+          <h2 class="text-lg font-bold mb-2">Panneau enseignant</h2>
+          <label class="block mb-2">Filtrer par formation :
+            <select id="formationFilter" class="border rounded px-2 py-1 ml-2"></select>
+          </label>
+          <canvas id="formationChart" class="w-full max
